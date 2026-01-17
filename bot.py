@@ -164,7 +164,7 @@ class Veera:
             }
         return self.HEADERS[address]
     
-    async def get_session(self, address: str, proxy_url=None):
+    async def get_session(self, address: str, proxy_url=None, timeout=60):
         if address not in self.sessions:
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             
@@ -174,9 +174,8 @@ class Veera:
             
             session = ClientSession(
                 connector=connector,
-                timeout=ClientTimeout(total=60),
-                cookie_jar=cookie_jar,
-                headers=self.HEADERS[address]
+                timeout=ClientTimeout(total=timeout),
+                cookie_jar=cookie_jar
             )
             
             self.sessions[address] = {
@@ -300,7 +299,7 @@ class Veera:
         url = "https://api.ipify.org?format=json"
 
         try:
-            session_info = await self.get_session(address, proxy_url)
+            session_info = await self.get_session(address, proxy_url, 15)
             session = session_info['session']
             proxy = session_info['proxy']
             proxy_auth = session_info['proxy_auth']
@@ -330,7 +329,8 @@ class Veera:
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
 
-                headers={"Content-Type": "application/json"}
+                headers = self.initialize_headers(address)
+                headers["Content-Type"] = "application/json"
                 
                 async with session.get(
                     url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
@@ -363,7 +363,8 @@ class Veera:
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
 
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers = self.initialize_headers(address)
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
                 
                 async with session.post(
                     url=url, headers=headers, data=payload, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False
@@ -394,9 +395,11 @@ class Veera:
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
+
+                headers = self.initialize_headers(address)
                 
                 async with session.get(
-                    url=url, proxy=proxy, proxy_auth=proxy_auth
+                    url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
                 ) as response:
                     await self.ensure_ok(response)
                     return await response.json()
@@ -424,7 +427,8 @@ class Veera:
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
 
-                headers={"Content-Type": "application/json"}
+                headers = self.initialize_headers(address)
+                headers["Content-Type"] = "application/json"
                 
                 async with session.post(
                     url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth
@@ -550,8 +554,6 @@ class Veera:
                                 f"{Fore.RED + Style.BRIGHT} Invalid Private Key or Library Version Not Supported {Style.RESET_ALL}"
                             )
                             continue
-
-                        self.initialize_headers(address)
                         
                         await self.process_accounts(account, address, use_proxy, rotate_proxy)
                         await asyncio.sleep(random.uniform(2.0, 3.0))
