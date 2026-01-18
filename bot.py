@@ -319,12 +319,12 @@ class Veera:
         
         return None
     
-    async def auth_csrf(self, address: str, retries=5):
+    async def auth_csrf(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/csrf"
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address)
+                session_info = await self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
@@ -352,13 +352,13 @@ class Veera:
 
         return None
     
-    async def auth_credentials(self, account: str, address: str, csrf_token: str, retries=5):
+    async def auth_credentials(self, account: str, address: str, csrf_token: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/callback/credentials"
         payload = self.generate_payload(account, address, csrf_token)
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address)
+                session_info = await self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
@@ -386,12 +386,12 @@ class Veera:
 
         return None
 
-    async def loyality_account(self, address: str, retries=5):
+    async def loyality_account(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/loyalty/accounts?websiteId={self.WEB_ID}&organizationId={self.ORG_ID}&walletAddress={address}"
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address)
+                session_info = await self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
@@ -417,12 +417,12 @@ class Veera:
 
         return None
     
-    async def complete_checkin(self, address: str, retries=5):
+    async def complete_checkin(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/loyalty/rules/0c2c81eb-c631-48a8-9f27-a97d192e0039/complete"
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address)
+                session_info = await self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
@@ -477,13 +477,14 @@ class Veera:
     async def process_user_login(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
         is_valid = await self.process_check_connection(address, use_proxy, rotate_proxy)
         if is_valid:
+            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
 
-            auth_csrf = await self.auth_csrf(address)
+            auth_csrf = await self.auth_csrf(address, proxy)
             if not auth_csrf: return False
 
             csrf_token = auth_csrf.get("csrfToken")
 
-            credentials = await self.auth_credentials(account, address, csrf_token)
+            credentials = await self.auth_credentials(account, address, csrf_token, proxy)
             if not credentials: return False
 
             self.log(
@@ -498,8 +499,9 @@ class Veera:
     async def process_accounts(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
         logined = await self.process_user_login(account, address, use_proxy, rotate_proxy)
         if logined:
+            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
 
-            loyality = await self.loyality_account(address)
+            loyality = await self.loyality_account(address, proxy)
             if loyality:
                 loyality_data = loyality.get("data", [])
 
@@ -513,7 +515,7 @@ class Veera:
                     f"{Fore.WHITE+Style.BRIGHT} {amount} Points {Style.RESET_ALL}"
                 )
 
-            checkin = await self.complete_checkin(address)
+            checkin = await self.complete_checkin(address, proxy)
             if checkin:
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
