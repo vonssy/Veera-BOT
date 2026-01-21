@@ -21,6 +21,7 @@ class Veera:
         self.BASE_API = "https://hub.veerarewards.com"
         self.WEB_ID = "d2c97001-a40d-45b6-b69c-11927e144773"
         self.ORG_ID = "3cf0dde2-04c0-424a-a603-13fcf79e440e"
+        self.RULES_ID = "0c2c81eb-c631-48a8-9f27-a97d192e0039"
         self.REF_CODE = "0HZHN48B" # U can change it with yours.
         self.HEADERS = {}
         self.proxies = []
@@ -164,7 +165,7 @@ class Veera:
             }
         return self.HEADERS[address]
     
-    async def get_session(self, address: str, proxy_url=None, timeout=60):
+    def get_session(self, address: str, proxy_url=None, timeout=60):
         if address not in self.sessions:
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             
@@ -299,7 +300,7 @@ class Veera:
         url = "https://api.ipify.org?format=json"
 
         try:
-            session_info = await self.get_session(address, proxy_url, 15)
+            session_info = self.get_session(address, proxy_url, 15)
             session = session_info['session']
             proxy = session_info['proxy']
             proxy_auth = session_info['proxy_auth']
@@ -321,16 +322,15 @@ class Veera:
     
     async def auth_csrf(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/csrf"
+        headers = self.initialize_headers(address)
+        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address, proxy_url)
+                session_info = self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
-
-                headers = self.initialize_headers(address)
-                headers["Content-Type"] = "application/json"
                 
                 async with session.get(
                     url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
@@ -354,17 +354,16 @@ class Veera:
     
     async def auth_credentials(self, account: str, address: str, csrf_token: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/callback/credentials"
+        headers = self.initialize_headers(address)
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
         payload = self.generate_payload(account, address, csrf_token)
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address, proxy_url)
+                session_info = self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
-
-                headers = self.initialize_headers(address)
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
                 
                 async with session.post(
                     url=url, headers=headers, data=payload, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False
@@ -387,19 +386,23 @@ class Veera:
         return None
 
     async def loyality_account(self, address: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/api/loyalty/accounts?websiteId={self.WEB_ID}&organizationId={self.ORG_ID}&walletAddress={address}"
+        url = f"{self.BASE_API}/api/loyalty/accounts"
+        headers = self.initialize_headers(address)
+        params = {
+            "websiteId": self.WEB_ID, 
+            "organizationId": self.ORG_ID, 
+            "walletAddress": address
+        }
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address, proxy_url)
+                session_info = self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
-
-                headers = self.initialize_headers(address)
                 
                 async with session.get(
-                    url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
+                    url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth
                 ) as response:
                     await self.ensure_ok(response)
                     return await response.json()
@@ -418,29 +421,32 @@ class Veera:
         return None
     
     async def complete_checkin(self, address: str, proxy_url=None, retries=5):
-        url = f"{self.BASE_API}/api/loyalty/rules/0c2c81eb-c631-48a8-9f27-a97d192e0039/complete"
+        url = f"{self.BASE_API}/api/loyalty/rules/{self.RULES_ID}/complete"
+        headers = self.initialize_headers(address)
+        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
             try:
-                session_info = await self.get_session(address, proxy_url)
+                session_info = self.get_session(address, proxy_url)
                 session = session_info['session']
                 proxy = session_info['proxy']
                 proxy_auth = session_info['proxy_auth']
-
-                headers = self.initialize_headers(address)
-                headers["Content-Type"] = "application/json"
                 
                 async with session.post(
                     url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth
                 ) as response:
+                    result = await response.json()
+
                     if response.status == 400:
+                        err_msg = result.get("message")
                         self.log(
                             f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
-                            f"{Fore.YELLOW+Style.BRIGHT} Already Claimed {Style.RESET_ALL}"
+                            f"{Fore.YELLOW+Style.BRIGHT} {err_msg} {Style.RESET_ALL}"
                         )
                         return None
+                    
                     await self.ensure_ok(response)
-                    return await response.json()
+                    return result
                     
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
