@@ -75,7 +75,7 @@ class Veera:
                 accounts = [line.strip() for line in file if line.strip()]
             return accounts
         except Exception as e:
-            self.log(f"{Fore.RED + Style.BRIGHT}Failed To Load Accounts: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED + Style.BRIGHT}Failed To Load Accounts: {e}{Style.RESET_ALL}")
             return None
 
     def load_proxies(self):
@@ -184,9 +184,9 @@ class Veera:
 
         return self.HEADERS[address].copy()
         
-    def generate_address(self, account: str):
+    def generate_address(self, private_key: str):
         try:
-            account = Account.from_key(account)
+            account = Account.from_key(private_key)
             address = account.address
             return address
         except Exception as e:
