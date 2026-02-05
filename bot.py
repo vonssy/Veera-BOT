@@ -2,17 +2,16 @@ from aiohttp import (
     ClientResponseError,
     ClientSession,
     ClientTimeout,
-    BasicAuth,
-    CookieJar
+    BasicAuth
 )
 from aiohttp_socks import ProxyConnector
-from yarl import URL
+from http.cookies import SimpleCookie
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import to_hex
 from datetime import datetime, timezone
 from colorama import *
-import asyncio, random, json, re, os, pytz
+import asyncio, random, json, pytz, sys, re, os
 
 wib = pytz.timezone('Asia/Jakarta')
 
@@ -23,12 +22,13 @@ class Veera:
         self.ORG_ID = "3cf0dde2-04c0-424a-a603-13fcf79e440e"
         self.RULES_ID = "0c2c81eb-c631-48a8-9f27-a97d192e0039"
         self.REF_CODE = "0HZHN48B" # U can change it with yours.
+        self.USE_PROXY = False
+        self.ROTATE_PROXY = False
         self.HEADERS = {}
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
-        self.sessions = {}
-        self.ua_index = 0
+        self.header_cookies = {}
         
         self.USER_AGENTS = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -143,10 +143,28 @@ class Veera:
 
         raise Exception("Unsupported Proxy Type.")
     
-    def get_next_user_agent(self):
-        ua = self.USER_AGENTS[self.ua_index]
-        self.ua_index = (self.ua_index + 1) % len(self.USER_AGENTS)
-        return ua
+    def display_proxy(self, proxy_url=None):
+        if not proxy_url: return "No Proxy"
+
+        proxy_url = re.sub(r"^(http|https|socks4|socks5)://", "", proxy_url)
+
+        if "@" in proxy_url:
+            proxy_url = proxy_url.split("@", 1)[1]
+
+        return proxy_url
+    
+    def extract_cookies(self, address, response, jar=SimpleCookie()):
+        if address in self.header_cookies:
+            jar.load(self.header_cookies[address])
+
+        for h in response.headers.getall("Set-Cookie", []):
+            jar.load(h)
+
+        jar["referral_code"] = self.REF_CODE
+
+        self.header_cookies[address] = "; ".join(f"{k}={m.value}" for k, m in jar.items())
+
+        return self.header_cookies[address]
     
     def initialize_headers(self, address: str):
         if address not in self.HEADERS:
@@ -161,40 +179,10 @@ class Veera:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "User-Agent": self.get_next_user_agent()
+                "User-Agent": random.choice(self.USER_AGENTS)
             }
-        return self.HEADERS[address]
-    
-    def get_session(self, address: str, proxy_url=None, timeout=60):
-        if address not in self.sessions:
-            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
-            
-            cookie_jar = CookieJar(unsafe=True)
-            
-            cookie_jar.update_cookies({'referral_code': self.REF_CODE}, URL(self.BASE_API))
-            
-            session = ClientSession(
-                connector=connector,
-                timeout=ClientTimeout(total=timeout),
-                cookie_jar=cookie_jar
-            )
-            
-            self.sessions[address] = {
-                'session': session,
-                'proxy': proxy,
-                'proxy_auth': proxy_auth
-            }
-        
-        return self.sessions[address]
-    
-    async def close_session(self, address: str):
-        if address in self.sessions:
-            await self.sessions[address]['session'].close()
-            del self.sessions[address]
-    
-    async def close_all_sessions(self):
-        for address in list(self.sessions.keys()):
-            await self.close_session(address)
+
+        return self.HEADERS[address].copy()
         
     def generate_address(self, account: str):
         try:
@@ -202,11 +190,18 @@ class Veera:
             address = account.address
             return address
         except Exception as e:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Generate Address Failed {Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+            )
             return None
         
-    def generate_payload(self, account: str, address: str, csrf_token: str):
+    def generate_payload(self, private_key: str, address: str, csrf_token: str):
         try:
-            issued_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            dt_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            issued_at = dt_now.replace("+00:00", "Z")
 
             raw_message = json.dumps({
                 "domain": "hub.veerarewards.com",
@@ -231,7 +226,7 @@ class Veera:
             )
 
             encoded_message = encode_defunct(text=message)
-            signed_message = Account.sign_message(encoded_message, private_key=account)
+            signed_message = Account.sign_message(encoded_message, private_key=private_key)
             signature = to_hex(signed_message.signature)
 
             payload = {
@@ -272,44 +267,36 @@ class Veera:
                         "Without"
                     )
                     print(f"{Fore.GREEN + Style.BRIGHT}Run {proxy_type} Proxy Selected.{Style.RESET_ALL}")
+                    self.USE_PROXY = True if proxy_choice == 1 else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Please enter either 1 or 2.{Style.RESET_ALL}")
             except ValueError:
                 print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1 or 2).{Style.RESET_ALL}")
 
-        rotate_proxy = False
-        if proxy_choice == 1:
+        if self.USE_PROXY:
             while True:
                 rotate_proxy = input(f"{Fore.BLUE + Style.BRIGHT}Rotate Invalid Proxy? [y/n] -> {Style.RESET_ALL}").strip()
-
                 if rotate_proxy in ["y", "n"]:
-                    rotate_proxy = rotate_proxy == "y"
+                    self.ROTATE_PROXY = True if rotate_proxy == "y" else False
                     break
                 else:
                     print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter 'y' or 'n'.{Style.RESET_ALL}")
-
-        return proxy_choice, rotate_proxy
     
     async def ensure_ok(self, response):
         if response.status >= 400:
             error_text = await response.text()
             raise Exception(f"HTTP {response.status}: {error_text}")
     
-    async def check_connection(self, address: str, proxy_url=None):
+    async def check_connection(self, proxy_url=None):
         url = "https://api.ipify.org?format=json"
 
+        connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
         try:
-            session_info = self.get_session(address, proxy_url, 15)
-            session = session_info['session']
-            proxy = session_info['proxy']
-            proxy_auth = session_info['proxy_auth']
-            
-            async with session.get(
-                url=url, proxy=proxy, proxy_auth=proxy_auth
-            ) as response:
-                await self.ensure_ok(response)
-                return True
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
+                async with session.get(url=url, proxy=proxy, proxy_auth=proxy_auth) as response:
+                    await self.ensure_ok(response)
+                    return True
         except (Exception, ClientResponseError) as e:
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
@@ -322,63 +309,54 @@ class Veera:
     
     async def auth_csrf(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/csrf"
-        headers = self.initialize_headers(address)
-        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.get(
-                    url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    result = await response.json()
-                    return result
-                    
+                headers = self.initialize_headers(address)
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        self.extract_cookies(address, response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Fetch Nonce Failed {Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT}Login   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Csrf Token {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
 
         return None
     
-    async def auth_credentials(self, account: str, address: str, csrf_token: str, proxy_url=None, retries=5):
+    async def auth_credentials(self, private_key: str, address: str, csrf_token: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/auth/callback/credentials"
-        headers = self.initialize_headers(address)
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        payload = self.generate_payload(account, address, csrf_token)
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.post(
-                    url=url, headers=headers, data=payload, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False
-                ) as response:
-                    cookies = session.cookie_jar.filter_cookies(URL(url))
-                    if any('session-token' in str(cookie.key) for cookie in cookies.values()):
+                headers = self.initialize_headers(address)
+                headers["Cookie"] = self.header_cookies[address]
+                headers["Content-Type"] = "application/json"
+                headers["X-Requested-With"] = "XMLHttpRequest"
+                payload = self.generate_payload(private_key, address, csrf_token)
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        self.extract_cookies(address, response)
                         return True
-                        
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Login Failed {Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT}Login   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Session Token {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -387,33 +365,29 @@ class Veera:
 
     async def loyality_account(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/loyalty/accounts"
-        headers = self.initialize_headers(address)
-        params = {
-            "websiteId": self.WEB_ID, 
-            "organizationId": self.ORG_ID, 
-            "walletAddress": address
-        }
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address)
+                headers["Cookie"] = self.header_cookies[address]
+                params = {
+                    "websiteId": self.WEB_ID, 
+                    "organizationId": self.ORG_ID, 
+                    "walletAddress": address
+                }
                 
-                async with session.get(
-                    url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
-                    
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Balance :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Fetch Points Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Points {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -422,32 +396,28 @@ class Veera:
     
     async def complete_checkin(self, address: str, proxy_url=None, retries=5):
         url = f"{self.BASE_API}/api/loyalty/rules/{self.RULES_ID}/complete"
-        headers = self.initialize_headers(address)
-        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address)
+                headers["Cookie"] = self.header_cookies[address]
+                headers["Content-Type"] = "application/json"
                 
-                async with session.post(
-                    url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    result = await response.json()
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        result = await response.json()
 
-                    if response.status == 400:
-                        err_msg = result.get("message")
-                        self.log(
-                            f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
-                            f"{Fore.YELLOW+Style.BRIGHT} {err_msg} {Style.RESET_ALL}"
-                        )
-                        return None
-                    
-                    await self.ensure_ok(response)
-                    return result
-                    
+                        if response.status == 400:
+                            err_msg = result.get("message")
+                            self.log(
+                                f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
+                                f"{Fore.YELLOW+Style.BRIGHT} {err_msg} {Style.RESET_ALL}"
+                            )
+                            return None
+                        
+                        await self.ensure_ok(response)
+                        return result
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -461,79 +431,84 @@ class Veera:
 
         return None
     
-    async def process_check_connection(self, address: str, use_proxy: bool, rotate_proxy: bool):
+    async def process_check_connection(self, address: str, proxy_url=None):
         while True:
-            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
+            if self.USE_PROXY:
+                proxy_url = self.get_next_proxy_for_account(address)
+
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Proxy   :{Style.RESET_ALL}"
-                f"{Fore.WHITE+Style.BRIGHT} {proxy} {Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT} {self.display_proxy(proxy_url)} {Style.RESET_ALL}"
             )
 
-            is_valid = await self.check_connection(address, proxy)
+            is_valid = await self.check_connection(proxy_url)
             if is_valid: return True
 
-            if rotate_proxy:
-                await self.close_session(address)
-                proxy = self.rotate_proxy_for_account(address)
+            if self.ROTATE_PROXY:
+                proxy_url = self.rotate_proxy_for_account(address)
                 await asyncio.sleep(1)
                 continue
 
             return False
     
-    async def process_user_login(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
-        is_valid = await self.process_check_connection(address, use_proxy, rotate_proxy)
-        if is_valid:
-            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
+    async def process_user_login(self, private_key: str, address: str, proxy_url=None):
+        is_valid = await self.process_check_connection(address, proxy_url)
+        if not is_valid: return False
 
-            auth_csrf = await self.auth_csrf(address, proxy)
-            if not auth_csrf: return False
+        if self.USE_PROXY:
+            proxy_url = self.get_next_proxy_for_account(address)
 
-            csrf_token = auth_csrf.get("csrfToken")
+        auth_csrf = await self.auth_csrf(address, proxy_url)
+        if not auth_csrf: return False
 
-            credentials = await self.auth_credentials(account, address, csrf_token, proxy)
-            if not credentials: return False
+        csrf_token = auth_csrf.get("csrfToken")
+
+        credentials = await self.auth_credentials(private_key, address, csrf_token, proxy_url)
+        if not credentials: return False
+
+        self.log(
+            f"{Fore.CYAN + Style.BRIGHT}Status  :{Style.RESET_ALL}"
+            f"{Fore.GREEN + Style.BRIGHT} Login Success {Style.RESET_ALL}"
+        )
+
+        return True
+
+    async def process_accounts(self, private_key: str, address: str, proxy_url=None):
+        logined = await self.process_user_login(private_key, address, proxy_url)
+        if not logined: return False
+
+        if self.USE_PROXY:
+            proxy_url = self.get_next_proxy_for_account(address)
+
+        loyality = await self.loyality_account(address, proxy_url)
+        if loyality:
+            loyality_data = loyality.get("data", [])
+
+            if loyality_data:
+                amount = loyality_data[0].get("amount", 0)
+            else:
+                amount = 0
 
             self.log(
-                f"{Fore.CYAN + Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                f"{Fore.GREEN + Style.BRIGHT} Login Success {Style.RESET_ALL}"
+                f"{Fore.CYAN+Style.BRIGHT}Balance :{Style.RESET_ALL}"
+                f"{Fore.WHITE+Style.BRIGHT} {amount} Points {Style.RESET_ALL}"
             )
 
-            return True
-        
-        return False
-
-    async def process_accounts(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
-        logined = await self.process_user_login(account, address, use_proxy, rotate_proxy)
-        if logined:
-            proxy = self.get_next_proxy_for_account(address) if use_proxy else None
-
-            loyality = await self.loyality_account(address, proxy)
-            if loyality:
-                loyality_data = loyality.get("data", [])
-
-                if loyality_data:
-                    amount = loyality_data[0].get("amount", 0)
-                else:
-                    amount = 0
-
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Balance :{Style.RESET_ALL}"
-                    f"{Fore.WHITE+Style.BRIGHT} {amount} Points {Style.RESET_ALL}"
-                )
-
-            checkin = await self.complete_checkin(address, proxy)
-            if checkin:
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
-                    f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
-                )
+        checkin = await self.complete_checkin(address, proxy_url)
+        if checkin:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
+                f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
+            )
 
     async def main(self):
         try:
             accounts = self.load_accounts()
-            if not accounts: return
+            if not accounts:
+                print(f"{Fore.RED+Style.BRIGHT}No Accounts Loaded.{Style.RESET_ALL}") 
+                return
 
-            proxy_choice, rotate_proxy = self.print_question()
+            self.print_question()
 
             while True:
                 self.clear_terminal()
@@ -543,30 +518,29 @@ class Veera:
                     f"{Fore.WHITE + Style.BRIGHT}{len(accounts)}{Style.RESET_ALL}"
                 )
 
-                use_proxy = True if proxy_choice == 1 else False
-                if use_proxy: self.load_proxies()
+                if self.USE_PROXY: self.load_proxies()
 
                 separator = "=" * 25
-                for account in accounts:
-                    if account:
-                        address = self.generate_address(account)
-                        self.log(
-                            f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
-                            f"{Fore.WHITE + Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
-                            f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
-                        )
+                for idx, private_key in enumerate(accounts, start=1):
 
-                        if not address:
-                            self.log(
-                                f"{Fore.CYAN + Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                                f"{Fore.RED + Style.BRIGHT} Invalid Private Key or Library Version Not Supported {Style.RESET_ALL}"
-                            )
-                            continue
+                    self.log(
+                        f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {len(accounts)} {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
+                    )
+
+                    address = self.generate_address(private_key)
+                    if not address: continue
+
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Address :{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
+                    )
                         
-                        await self.process_accounts(account, address, use_proxy, rotate_proxy)
-                        await asyncio.sleep(random.uniform(2.0, 3.0))
-
-                await self.close_all_sessions()
+                    await self.process_accounts(private_key, address)
+                    await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*72)
                 
@@ -588,8 +562,8 @@ class Veera:
         except Exception as e:
             self.log(f"{Fore.RED+Style.BRIGHT}Error: {e}{Style.RESET_ALL}")
             raise e
-        finally:
-            await self.close_all_sessions()
+        except asyncio.CancelledError:
+            raise
 
 if __name__ == "__main__":
     try:
@@ -601,3 +575,5 @@ if __name__ == "__main__":
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.RED + Style.BRIGHT}[ EXIT ] Veera - BOT{Style.RESET_ALL}                                       "                              
         )
+    finally:
+        sys.exit(0)
